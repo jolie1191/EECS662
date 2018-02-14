@@ -1,0 +1,151 @@
+#lang plai
+
+;;abstract syntax of the WAEE
+(define-type WAEE
+  (num (n number?))
+  (id (name symbol?))
+  (binop (op symbol?) (lhs WAEE?) (rhs WAEE?))
+  (with (name symbol?) (named-expr WAEE?) (body WAEE?)))
+
+;;parse-wae:concrete syntax of WAEE --> WAEE data structure
+(define parse-waee
+  (lambda (sexp)
+    (cond ((number? sexp) (num sexp))
+          ((symbol? sexp) (id sexp))
+          ((list? sexp)
+           (case (car sexp)
+             ((+) (binop 'plus (parse-waee (cadr sexp)) (parse-waee (caddr sexp))))
+             ((-) (binop 'minus (parse-waee (cadr sexp)) (parse-waee (caddr sexp))))
+             ((*) (binop 'mult (parse-waee (cadr sexp)) (parse-waee (caddr sexp))))
+             ((/) (binop 'div (parse-waee (cadr sexp)) (parse-waee (caddr sexp))))
+             ((with) (with-rec (cadr sexp) (caddr sexp)))
+             (else (error 'parse-waee "parse-waee error"))))
+          (error 'parse-waee"parse-wae Error" ))))
+
+;;with recurssion
+(define with-rec
+  (lambda (binding-inst expr)
+    (cond ((null? binding-inst) (parse-waee expr))
+          ((symbol? (car binding-inst))
+           (with (car binding-inst) (parse-waee (cadr binding-inst)) (parse-waee expr)))
+          (else
+           (if (error-handler (caar binding-inst) (cdr binding-inst))
+               (error 'with-rec "identifiers define multiple times")
+               ;(if (check-reference-error (caar binding-inst) (cdr binding-inst))
+                   ;(error 'with-rec "Try to refer ealier defination of identifier")
+                   (with (caar binding-inst) (parse-waee (cadar binding-inst)) (with-rec (cdr binding-inst) expr)))))))
+
+;;Handle define indentifier twice
+(define error-handler
+  (lambda (i binding-list)
+    (cond ((null? binding-list) #f)
+          (#t (if (symbol=? (caar binding-list) i)
+              #t
+              (error-handler i (cdr binding-list)))))))
+
+;;testing
+;(parse-waee '(with ((x 3) (y 2)) (+ x y)))
+
+;;Handle reference error
+(define check-reference-error
+  (lambda (i binding-list)
+    (cond ((null? binding-list) #f)
+          (#t (if (memq i (cadr(car binding-list)))
+              #t
+              (check-reference-error i (cdr binding-list)))))))
+
+;;subst: WAEE symbol WAEE --> WAEE
+(define subst
+  (lambda (e i v)
+    (type-case WAEE e
+      (num (n) (num n))
+      (binop (op l r) (binop op (subst l i v) (subst r i v)))
+      (with (bound-id named-expr bound-body)
+            (if (symbol=? bound-id i)
+                (with bound-id
+                      (subst named-expr i v)
+                      bound-body)
+                (with bound-id
+                      (subst named-expr i v)
+                      (subst bound-body i v))))
+      (id (name)
+          (if (symbol=? name i) 
+              v
+              (id name))))))
+
+;;interp-waee
+;;WAEE --> value
+;;evaluates WAEE expressions by reducing them to numbers
+(define interp-waee
+  (lambda (expr)
+    (type-case WAEE expr
+      (num (n) n)
+      (binop (op-name l r) ((lookup op-name op-table)(interp-waee l) (interp-waee r)))
+      (with (bound-id named-expr bound-body)
+            (interp-waee (subst bound-body bound-id (num (interp-waee named-expr)))))
+      (id (name) (error 'interp-waee "free id")))))
+
+;;binop-rec
+(define-type binop-recognizer
+  (binop-rec (name symbol?) (op procedure?)))
+
+;;lookup
+(define lookup
+  (lambda (op-name op-table)
+     (cond ((empty? op-table) (error 'lookup "Operator not found"))
+           (else (if (symbol=? (binop-rec-name (car op-table)) op-name)
+                     (binop-rec-op (car op-table))
+                     (lookup op-name (cdr op-table)))))))
+
+;;op-table
+(define op-table (list
+                  (binop-rec 'plus +)
+                  (binop-rec 'minus -)
+                  (binop-rec 'mult *)
+                  (binop-rec 'div /)))
+
+;;eval-waee
+;combine parser and interpreter---> value
+(define eval-waee
+  (lambda (sexp)
+    (interp-waee (parse-waee sexp))))
+
+
+;;Testing================================ 
+(test (eval-waee '1) 1)
+(test (eval-waee '{+ 1 1}) 2)
+(test (eval-waee '{- 1 1}) 0)
+(test (eval-waee '{* 2 2}) 4)
+(test (eval-waee '{/ 4 2}) 2)
+(test (eval-waee '{with {{x 3}} {+ x x}}) 6)
+(test (eval-waee '{with {{x 3} {y 4}} {+ x y}}) 7)
+(test (eval-waee '{with {{x 3} {y 4}} {+ x y}}) 7)
+(test (eval-waee '{with {{x 3}} {with {{y 4}} {+ x y}}}) 7)
+(test (eval-waee '{with {{x 3}} {with {{y {+ x x}}} {+ x y}}}) 9)
+(test (eval-waee '{with {{x 3}} {with {{y {+ x x}}} {with {{x 1}} {+ x y}}}}) 7)
+(test (eval-waee '{with {{x 1} {y 2}} {with {{z x} {x x}} {with {{z {+ z 1}}} {+ z y}}}}) 4)
+
+;;Testing result----------
+#|(good (eval-waee '(* 2 2)) 4 4 "at line 133")
+(good (eval-waee '(/ 4 2)) 2 2 "at line 134")
+(good (eval-waee '(with ((x 3)) (+ x x))) 6 6 "at line 135")
+(good (eval-waee '(with ((x 3) (y 4)) (+ x y))) 7 7 "at line 136")
+(good (eval-waee '(with ((x 3) (y 4)) (+ x y))) 7 7 "at line 137")
+(good (eval-waee '(with ((x 3)) (with ((y 4)) (+ x y)))) 7 7 "at line 138")
+(good (eval-waee '(with ((x 3)) (with ((y (+ x x))) (+ x y)))) 9 9 "at line 139")
+(good (eval-waee '(with ((x 3)) (with ((y (+ x x))) (with ((x 1)) (+ x y))))) 7 7 "at line 140")
+(good (eval-waee '(with ((x 1) (y 2)) (with ((z x) (x x)) (with ((z (+ z 1))) (+ z y))))) 4 4 "at line 141")|#
+
+;;Error testing================================
+;(test (eval-waee '(with ((y 3) (x 4) (d 3) (a (with (v 5) (- 10 9))) (d 5)) (/ 8 (* x 5)))) 0)
+;;(exception (eval-waee '(with ((y 3) (x 4) (d 3) (a (with (v 5) (- 10 9))) (d 5)) (/ 8 (* x 5)))) "with-rec: identifiers define multiple times" 0 "at line 149")
+;(test (eval-waee '(with ((y 3) (x 4) (d 3)) (/ 8 (* x (with ((a (with (v 5) (- 10 9)))(a 7)) (- a a)))))) 0)
+;(exception (eval-waee '(with ((y 3) (x 4) (d 3)) (/ 8 (* x (with ((a (with (v 5) (- 10 9))) (a 7)) (- a a)))))) "with-rec: identifiers define multiple times" 0 "at line 151")
+;(test (eval-waee '(with ((x 3) (y 2)) (+ x z))) 0)
+;(exception (eval-waee '(with ((x 3) (y 2)) (+ x z))) "interp-waee: free id" 0 "at line 124")
+
+
+(eval-waee '(with (x 3)    
+                  (+ (with (x 2) (+ x 3)) 
+                     x)))
+
